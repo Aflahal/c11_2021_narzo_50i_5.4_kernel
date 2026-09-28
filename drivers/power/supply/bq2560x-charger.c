@@ -1,5 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0:
+// SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2021 unisoc.
+
+/*
+ * 5.4 port notes
+ *
+ * The 4.14 driver started/stopped charging by itself from a usb_phy notifier
+ * (usb_phy->chg_type + cm_notify_event()). On 5.4 the charger manager drives
+ * the charger through power_supply properties (STATUS, PRESENT, CALIBRATE,
+ * TYPE, ...), so this file keeps the 5.4 property interface and carries over
+ * the board specific behaviour of the 4.14 driver:
+ *   - safety timer disabled at init, 240 mA termination current fallback
+ *   - the symbols the 4.14 driver exported/left global (BQ2560X_KEEP_4_14_SYMBOLS)
+ *   - the run-in stop switch (BQ2560X_SUPPORT_RUNIN_STOP, off by default)
+ */
 
 /*
  * Driver for the TI bq2560x charger.
@@ -25,9 +38,7 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/sysfs.h>
-#include <linux/usb/phy.h>
 #include <linux/pm_wakeup.h>
-#include <uapi/linux/usb/charger.h>
 
 #define BQ2560X_REG_0				0x0
 #define BQ2560X_REG_1				0x1
@@ -45,7 +56,7 @@
 
 #define BQ2560X_BATTERY_NAME			"sc27xx-fgu"
 #define BIT_DP_DM_BC_ENB			BIT(0)
-#define BQ2560X_OTG_ALARM_TIMER_MS		15000
+#define BQ2560X_OTG_ALARM_TIMER_S		15
 
 #define	BQ2560X_REG_IINLIM_BASE			100
 
@@ -79,10 +90,56 @@
 #define BQ2560X_REG_EN_HIZ_MASK			GENMASK(7, 7)
 #define BQ2560X_REG_EN_HIZ_SHIFT		7
 
+#define BQ2560X_DISABLE_BATFET_RST_MASK         BIT(2)
+#define BQ2560X_DISABLE_BATFET_RST_SHIFT        2
+
 #define BQ2560X_REG_LIMIT_CURRENT_MASK		GENMASK(4, 0)
 
 #define BQ2560X_DISABLE_PIN_MASK		BIT(0)
 #define BQ2560X_DISABLE_PIN_MASK_2721		BIT(15)
+
+#define BQ2560X_REG1_SYS_MINV_MASK		GENMASK(3, 1)
+#define BQ2560X_REG1_SYS_MINV_SHIFT		1
+
+#define BQ2560X_REG01_CHG_CONFIG_MASK		GENMASK(4, 4)
+#define BQ2560X_REG01_CHG_CONFIG_SHIFT		4
+#define BQ2560X_REG01_CHG_DISABLE		0
+#define BQ2560X_REG01_CHG_ENABLE		1
+
+#define BQ2560X_REG_05			0x05
+#define BQ2560X_REG05_WDT_MASK			GENMASK(5, 4)
+#define BQ2560X_REG05_WDT_SHIFT			4
+#define BQ2560X_REG05_WDT_DISABLE		0
+#define BQ2560X_REG05_WDT_40S			1
+#define BQ2560X_REG05_WDT_80S			2
+#define BQ2560X_REG05_WDT_160S			3
+#define BQ2560X_REG05_WDT_BASE			0
+#define BQ2560X_REG05_WDT_LSB			40
+
+/* Register 0x07*/
+#define BQ2560X_REG_07			0x07
+#define BQ2560X_REG07_BATFET_DIS_MASK		GENMASK(5, 5)
+#define BQ2560X_REG07_BATFET_DIS_SHIFT		5
+#define BQ2560X_REG07_BATFET_OFF		1
+#define BQ2560X_REG07_BATFET_ON			0
+
+/* Register 0x0B */
+#define BQ2560X_REG_0B			0x0b
+#define BQ2560X_REG0B_RESET_MASK		GENMASK(7, 7)
+#define BQ2560X_REG0B_RESET_SHIFT		7
+#define BQ2560X_REG0B_RESET			1
+
+#define BQ2560X_REG0B_PN_MASK			GENMASK(6, 3)
+#define BQ2560X_REG0B_PN_SHIFT			3
+
+#define BQ2560X_REG0B_VENDOR_ID_MASK			GENMASK(2, 2)
+#define BQ2560X_REG0B_VENDOR_ID_SHIFT			2
+
+#define BQ2560x_REG0B_PN_IS_BQ25601		2
+
+#define BQ2560X_REG0B_DEV_REV_MASK		GENMASK(1, 0)
+#define BQ2560X_REG0B_DEV_REV_SHIFT		0
+
 
 #define BQ2560X_OTG_VALID_MS			500
 #define BQ2560X_FEED_WATCHDOG_VALID_MS		50
@@ -103,10 +160,29 @@
 #define BQ2560X_WAKE_UP_MS			1000
 #define BQ2560X_CURRENT_WORK_MS			msecs_to_jiffies(100)
 
-#define BQ2560X_PD_HARD_RESET_MS		500
-#define BQ2560X_PD_RECONNECT_MS			3000
+#define SGM41513_I2C_ADDR			0x1a
 
-extern int sc27xx_fgu_bat_id;
+/* Charge safety timer (REG05 bit 3), disabled by the 4.14 driver at init */
+#define BQ2560X_REG05_EN_TIMER_MASK		BIT(3)
+#define BQ2560X_REG05_EN_TIMER_SHIFT		3
+#define BQ2560X_REG05_CHG_TIMER_DISABLE		0
+
+/* The 4.14 driver always programmed 240 mA termination current */
+#define BQ2560X_DEFAULT_TERM_CUR_MA		240
+
+/*
+ * Symbols the 4.14 driver exported or left global (chipid_num, pinfo,
+ * charger_dev_*, bq2560x_dump_regs, bq2560x_set_ship_mode, ...). Other vendor
+ * code from the 4.14 tree may still call them. Set to 0 if nothing in the 5.4
+ * tree references them.
+ */
+#define BQ2560X_KEEP_4_14_SYMBOLS		1
+
+/*
+ * 4.14 "run-in" factory test stop switch. It needs
+ * POWER_SUPPLY_PROP_RUNIN_STOP in power_supply.h, so it is off by default.
+ */
+/* #define BQ2560X_SUPPORT_RUNIN_STOP */
 
 struct bq2560x_charger_sysfs {
 	char *name;
@@ -136,32 +212,21 @@ struct bq2560x_charge_current {
 struct bq2560x_charger_info {
 	struct i2c_client *client;
 	struct device *dev;
-	struct usb_phy *usb_phy;
-	struct notifier_block usb_notify;
 	struct power_supply *psy_usb;
 	struct bq2560x_charge_current cur;
-	struct work_struct work;
 	struct mutex lock;
+	struct mutex input_limit_cur_lock;
 	struct delayed_work otg_work;
 	struct delayed_work wdt_work;
 	struct delayed_work cur_work;
 	struct regmap *pmic;
 	struct gpio_desc *gpiod;
 	struct extcon_dev *typec_extcon;
-	struct notifier_block typec_extcon_nb;
-	struct delayed_work typec_extcon_work;
-	struct extcon_dev *pd_extcon;
-	struct notifier_block pd_extcon_nb;
-	struct delayed_work pd_hard_reset_work;
-	bool pd_hard_reset;
-	bool pd_extcon_enable;
-	bool typec_online;
 	struct alarm otg_timer;
 	struct bq2560x_charger_sysfs *sysfs;
 	u32 charger_detect;
 	u32 charger_pd;
 	u32 charger_pd_mask;
-	u32 limit;
 	u32 new_charge_limit_cur;
 	u32 current_charge_limit_cur;
 	u32 new_input_limit_cur;
@@ -175,10 +240,22 @@ struct bq2560x_charger_info {
 	bool otg_enable;
 	unsigned int irq_gpio;
 	bool is_wireless_charge;
+	bool is_charger_online;
+	bool runin_stop;
 
 	int reg_id;
 	bool disable_power_path;
+	bool use_typec_extcon;
+	int chip_main_id;
+	int chip_sub_id;
+	char *name;
+
 };
+
+#if BQ2560X_KEEP_4_14_SYMBOLS
+int chipid_num = 0xff;
+struct bq2560x_charger_info *pinfo;
+#endif
 
 struct bq2560x_charger_reg_tab {
 	int id;
@@ -201,27 +278,44 @@ static struct bq2560x_charger_reg_tab reg_tab[BQ2560X_REG_NUM + 1] = {
 	{11, BQ2560X_REG_B, "REG_RST/PN/DEV_REV"},
 	{12, 0, "null"},
 };
+static void bq2560x_dump_register(struct bq2560x_charger_info *info);
 
 static void power_path_control(struct bq2560x_charger_info *info)
 {
 	struct device_node *cmdline_node;
 	const char *cmd_line;
+	const char *match;
 	int ret;
 
-	cmdline_node = of_find_node_by_path("/chosen");
-	ret = of_property_read_string(cmdline_node, "bootargs", &cmd_line);
-	if (ret) {
-		info->disable_power_path = false;
-		return;
-	}
+	info->disable_power_path = false;
 
-	if (!strncmp(cmd_line, "charger", strlen("charger")))
+	cmdline_node = of_find_node_by_path("/chosen");
+	if (!cmdline_node)
+		return;
+
+	ret = of_property_read_string(cmdline_node, "bootargs", &cmd_line);
+	of_node_put(cmdline_node);
+	if (ret)
+		return;
+
+	if (strncmp(cmd_line, "charger", strlen("charger")) == 0)
 		info->disable_power_path = true;
+
+	/* same modes the 4.14 boot_mode() __setup() handler looked at */
+	match = strstr(cmd_line, "androidboot.mode=");
+	if (match) {
+		match += strlen("androidboot.mode=");
+		if (!strncmp(match, "cali", strlen("cali")) ||
+			!strncmp(match, "autotest", strlen("autotest")) ||
+			!strncmp(match, "factorytest", strlen("factorytest")))
+			info->disable_power_path = true;
+	}
 }
 
-static int
-bq2560x_charger_set_limit_current(struct bq2560x_charger_info *info,
-				  u32 limit_cur);
+static int bq2560x_charger_set_limit_current(struct bq2560x_charger_info *info,
+					     u32 limit_cur, bool enable);
+static u32 bq2560x_charger_get_limit_current(struct bq2560x_charger_info *info,
+					     u32 *limit_cur);
 
 static bool bq2560x_charger_is_bat_present(struct bq2560x_charger_info *info)
 {
@@ -264,6 +358,17 @@ static int bq2560x_charger_is_fgu_present(struct bq2560x_charger_info *info)
 	return 0;
 }
 
+#ifdef ZTE_FEATURE_NO_CHARGER
+static int bq2560x_read(struct bq2560x_charger_info *info, u8 reg, u8 *data)
+{
+	return -1;
+}
+
+static int bq2560x_write(struct bq2560x_charger_info *info, u8 reg, u8 data)
+{
+	return 0;
+}
+#else
 static int bq2560x_read(struct bq2560x_charger_info *info, u8 reg, u8 *data)
 {
 	int ret;
@@ -280,6 +385,7 @@ static int bq2560x_write(struct bq2560x_charger_info *info, u8 reg, u8 data)
 {
 	return i2c_smbus_write_byte_data(info->client, reg, data);
 }
+#endif
 
 static int bq2560x_update_bits(struct bq2560x_charger_info *info, u8 reg,
 			       u8 mask, u8 data)
@@ -311,6 +417,59 @@ bq2560x_charger_set_vindpm(struct bq2560x_charger_info *info, u32 vol)
 
 	return bq2560x_update_bits(info, BQ2560X_REG_6,
 				   BQ2560X_REG_VINDPM_VOLTAGE_MASK, reg_val);
+}
+
+#ifdef ZTE_CHARGER_NO_BATTERY
+static int
+bq2560x_charger_set_vsys_min(struct bq2560x_charger_info *info, u32 vol)
+{
+	u8 reg_val = 0;
+
+	reg_val = vol;
+
+	return bq2560x_update_bits(info, BQ2560X_REG_1,
+				   BQ2560X_REG1_SYS_MINV_MASK, reg_val << BQ2560X_REG1_SYS_MINV_SHIFT);
+}
+
+static int bq2560x_set_watch_dog_timer(struct bq2560x_charger_info *info, u32 timer)
+{
+	u8 reg_value = 0;
+
+	pr_info("bq2560x: set watchdog timer %ds\n", timer);
+
+	reg_value = (timer - BQ2560X_REG05_WDT_BASE) / BQ2560X_REG05_WDT_LSB;
+	bq2560x_update_bits(info, BQ2560X_REG_05, BQ2560X_REG05_WDT_MASK,
+			  reg_value << BQ2560X_REG05_WDT_SHIFT);
+
+	return 0;
+}
+
+#endif
+
+static int bq2560x_charger_set_shipmode(struct bq2560x_charger_info *info,
+					  u32 val)
+{
+	int ret = 0;
+	u8 reg_value = 0;
+
+	if (val)
+		reg_value = BQ2560X_REG07_BATFET_ON;
+	else
+		reg_value = BQ2560X_REG07_BATFET_OFF;
+
+	ret = bq2560x_update_bits(info, BQ2560X_REG_05, BQ2560X_REG05_WDT_MASK,
+			BQ2560X_REG05_WDT_DISABLE << BQ2560X_REG05_WDT_SHIFT);
+	if (ret)
+		pr_err("disable bq2560x wdt failed\n");
+
+	ret = bq2560x_update_bits(info, BQ2560X_REG_07, BQ2560X_REG07_BATFET_DIS_MASK,
+			reg_value << BQ2560X_REG07_BATFET_DIS_SHIFT);
+
+	if (ret)
+		pr_err("set_shipmode failed\n");
+	pr_info("bq2560x: set shipmode #####\n");
+
+	return ret;
 }
 
 static int
@@ -349,7 +508,7 @@ bq2560x_charger_set_termina_vol(struct bq2560x_charger_info *info, u32 vol)
 				   reg_val << BQ2560X_REG_TERMINAL_VOLTAGE_SHIFT);
 }
 
-static int
+int
 bq2560x_charger_set_termina_cur(struct bq2560x_charger_info *info, u32 cur)
 {
 	u8 reg_val;
@@ -365,18 +524,33 @@ bq2560x_charger_set_termina_cur(struct bq2560x_charger_info *info, u32 cur)
 				   BQ2560X_REG_TERMINAL_CUR_MASK,
 				   reg_val);
 }
+EXPORT_SYMBOL_GPL(bq2560x_charger_set_termina_cur);
+
+int bq2560x_disable_safety_timer(struct bq2560x_charger_info *info)
+{
+	return bq2560x_update_bits(info, BQ2560X_REG_5,
+				   BQ2560X_REG05_EN_TIMER_MASK,
+				   BQ2560X_REG05_CHG_TIMER_DISABLE <<
+				   BQ2560X_REG05_EN_TIMER_SHIFT);
+}
+EXPORT_SYMBOL_GPL(bq2560x_disable_safety_timer);
+
+#if BQ2560X_KEEP_4_14_SYMBOLS
+/* 4.14 API: cut the battery FET (ship mode). WDT is disabled first. */
+int bq2560x_set_ship_mode(struct bq2560x_charger_info *info)
+{
+	return bq2560x_charger_set_shipmode(info, 0);
+}
+EXPORT_SYMBOL_GPL(bq2560x_set_ship_mode);
+#endif
 
 static int bq2560x_charger_hw_init(struct bq2560x_charger_info *info)
 {
 	struct sprd_battery_info bat_info = {};
 	int voltage_max_microvolt, termination_cur;
 	int ret;
-	int num = 0;
 
-	if (sc27xx_fgu_bat_id == 2 || sc27xx_fgu_bat_id == 3)
-		num = 1;
-
-	ret = sprd_battery_get_battery_info(info->psy_usb, &bat_info, num);
+	ret = sprd_battery_get_battery_info(info->psy_usb, &bat_info);
 	if (ret) {
 		dev_warn(info->dev, "no battery information is supplied\n");
 
@@ -386,16 +560,16 @@ static int bq2560x_charger_hw_init(struct bq2560x_charger_info *info)
 		info->cur.dcp_cur = 1500000;
 		info->cur.cdp_limit = 1000000;
 		info->cur.cdp_cur = 1000000;
-		info->cur.unknown_limit = 500000;
-		info->cur.unknown_cur = 500000;
+		info->cur.unknown_limit = 1000000;
+		info->cur.unknown_cur = 1000000;
 
 		/*
 		 * If no battery information is supplied, we should set
-		 * default charge termination current to 120 mA, and default
+		 * default charge termination current to 240 mA, and default
 		 * charge termination voltage to 4.44V.
 		 */
 		voltage_max_microvolt = 4440;
-		termination_cur = 120;
+		termination_cur = BQ2560X_DEFAULT_TERM_CUR_MA;
 		info->termination_cur = termination_cur;
 	} else {
 		info->cur.sdp_limit = bat_info.cur.sdp_limit;
@@ -411,10 +585,13 @@ static int bq2560x_charger_hw_init(struct bq2560x_charger_info *info)
 
 		voltage_max_microvolt = bat_info.constant_charge_voltage_max_uv / 1000;
 		termination_cur = bat_info.charge_term_current_ua / 1000;
+		if (termination_cur <= 0)
+			termination_cur = BQ2560X_DEFAULT_TERM_CUR_MA;
 		info->termination_cur = termination_cur;
 		sprd_battery_put_battery_info(info->psy_usb, &bat_info);
 	}
 
+	bq2560x_dump_register(info);
 	ret = bq2560x_update_bits(info, BQ2560X_REG_B,
 				  BQ2560X_REG_RESET_MASK,
 				  BQ2560X_REG_RESET_MASK);
@@ -422,6 +599,11 @@ static int bq2560x_charger_hw_init(struct bq2560x_charger_info *info)
 		dev_err(info->dev, "reset bq2560x failed\n");
 		return ret;
 	}
+
+	/* 4.14 driver turned the charge safety timer off right after reset */
+	ret = bq2560x_disable_safety_timer(info);
+	if (ret)
+		dev_err(info->dev, "disable safety timer failed\n");
 
 	if (info->role == BQ2560X_ROLE_MASTER_DEFAULT) {
 		ret = bq2560x_charger_set_ovp(info, BQ2560X_FCHG_OVP_6V);
@@ -436,8 +618,11 @@ static int bq2560x_charger_hw_init(struct bq2560x_charger_info *info)
 			return ret;
 		}
 	}
-
+#ifdef ZTE_CHARGER_NO_BATTERY
+	ret = bq2560x_charger_set_vindpm(info, 3900); /* 3900mv */
+#else
 	ret = bq2560x_charger_set_vindpm(info, voltage_max_microvolt);
+#endif
 	if (ret) {
 		dev_err(info->dev, "set bq2560x vindpm vol failed\n");
 		return ret;
@@ -454,11 +639,29 @@ static int bq2560x_charger_hw_init(struct bq2560x_charger_info *info)
 		dev_err(info->dev, "set bq2560x terminal cur failed\n");
 		return ret;
 	}
-
-	ret = bq2560x_charger_set_limit_current(info, info->cur.unknown_cur);
+#ifdef ZTE_CHARGER_NO_BATTERY
+	ret = bq2560x_charger_set_limit_current(info, info->cur.unknown_limit, false);
 	if (ret)
 		dev_err(info->dev, "set bq2560x limit current failed\n");
+#else
+	ret = bq2560x_charger_set_limit_current(info, info->cur.unknown_cur, false);
+	if (ret)
+		dev_err(info->dev, "set bq2560x limit current failed\n");
+#endif
 
+	ret = bq2560x_update_bits(info, BQ2560X_REG_7,
+				  BQ2560X_DISABLE_BATFET_RST_MASK,
+				  0x0 << BQ2560X_DISABLE_BATFET_RST_SHIFT);
+	if (ret)
+		dev_err(info->dev, "disable batfet_rst_en failed\n");
+
+#ifdef ZTE_CHARGER_NO_BATTERY
+	bq2560x_charger_set_vsys_min(info, 7);
+	bq2560x_set_watch_dog_timer(info, 0);
+#endif
+	bq2560x_dump_register(info);
+	bq2560x_charger_set_shipmode(info, 1);
+	bq2560x_dump_register(info);
 	info->current_charge_limit_cur = BQ2560X_REG_ICHG_LSB * 1000;
 	info->current_input_limit_cur = BQ2560X_REG_IINDPM_LSB * 1000;
 
@@ -498,6 +701,10 @@ static int bq2560x_charger_start_charge(struct bq2560x_charger_info *info)
 {
 	int ret = 0;
 
+#ifdef ZTE_CHARGER_NO_BATTERY
+	dev_info(info->dev, "bq2560x_charger_start_charge return\n");
+	return ret;
+#endif
 	ret = bq2560x_update_bits(info, BQ2560X_REG_0,
 				  BQ2560X_REG_EN_HIZ_MASK, 0);
 	if (ret)
@@ -530,8 +737,7 @@ static int bq2560x_charger_start_charge(struct bq2560x_charger_info *info)
 		gpiod_set_value_cansleep(info->gpiod, 0);
 	}
 
-	ret = bq2560x_charger_set_limit_current(info,
-						info->last_limit_cur);
+	ret = bq2560x_charger_set_limit_current(info, info->last_limit_cur, false);
 	if (ret) {
 		dev_err(info->dev, "failed to set limit current\n");
 		return ret;
@@ -543,6 +749,22 @@ static int bq2560x_charger_start_charge(struct bq2560x_charger_info *info)
 
 	return ret;
 }
+
+#ifdef ZTE_CHARGER_NO_BATTERY
+static void bq2560x_charger_stop_charge(struct bq2560x_charger_info *info)
+{
+	int ret;
+
+	if (info->role == BQ2560X_ROLE_MASTER_DEFAULT) {
+		ret = bq2560x_update_bits(info, BQ2560X_REG_1,
+					  BQ2560X_REG01_CHG_CONFIG_MASK,
+					  BQ2560X_REG01_CHG_DISABLE << BQ2560X_REG01_CHG_CONFIG_SHIFT);
+		if (ret)
+			dev_err(info->dev, "disable charger failed\n");
+
+	}
+}
+#else
 
 static void bq2560x_charger_stop_charge(struct bq2560x_charger_info *info, bool present)
 {
@@ -595,9 +817,9 @@ static void bq2560x_charger_stop_charge(struct bq2560x_charger_info *info, bool 
 	if (ret)
 		dev_err(info->dev, "Failed to disable bq2560x watchdog\n");
 }
+#endif
 
-static int bq2560x_charger_set_current(struct bq2560x_charger_info *info,
-				       u32 cur)
+static int bq2560x_charger_set_current(struct bq2560x_charger_info *info, u32 cur)
 {
 	u8 reg_val;
 
@@ -614,8 +836,7 @@ static int bq2560x_charger_set_current(struct bq2560x_charger_info *info,
 				   reg_val);
 }
 
-static int bq2560x_charger_get_current(struct bq2560x_charger_info *info,
-				       u32 *cur)
+static int bq2560x_charger_get_current(struct bq2560x_charger_info *info, u32 *cur)
 {
 	u8 reg_val;
 	int ret;
@@ -630,12 +851,24 @@ static int bq2560x_charger_get_current(struct bq2560x_charger_info *info,
 	return 0;
 }
 
-static int
-bq2560x_charger_set_limit_current(struct bq2560x_charger_info *info,
-				  u32 limit_cur)
+static int bq2560x_charger_set_limit_current(struct bq2560x_charger_info *info,
+					     u32 limit_cur, bool enable)
 {
 	u8 reg_val;
-	int ret;
+	int ret = 0;
+
+	mutex_lock(&info->input_limit_cur_lock);
+	if (enable) {
+		ret = bq2560x_charger_get_limit_current(info, &limit_cur);
+		if (ret) {
+			dev_err(info->dev, "get limit cur failed\n");
+			goto out;
+		}
+
+		if (limit_cur == info->actual_limit_cur)
+			goto out;
+		limit_cur = info->actual_limit_cur;
+	}
 
 	if (limit_cur >= BQ2560X_LIMIT_CURRENT_MAX)
 		limit_cur = BQ2560X_LIMIT_CURRENT_MAX;
@@ -644,22 +877,24 @@ bq2560x_charger_set_limit_current(struct bq2560x_charger_info *info,
 	limit_cur -= BQ2560X_LIMIT_CURRENT_OFFSET;
 	limit_cur = limit_cur / 1000;
 	reg_val = limit_cur / BQ2560X_REG_IINLIM_BASE;
-
+	info->actual_limit_cur = reg_val * BQ2560X_REG_IINLIM_BASE * 1000;
+	info->actual_limit_cur += BQ2560X_LIMIT_CURRENT_OFFSET;
 	ret = bq2560x_update_bits(info, BQ2560X_REG_0,
 				  BQ2560X_REG_LIMIT_CURRENT_MASK,
 				  reg_val);
 	if (ret)
 		dev_err(info->dev, "set bq2560x limit cur failed\n");
 
-	info->actual_limit_cur = reg_val * BQ2560X_REG_IINLIM_BASE * 1000;
-	info->actual_limit_cur += BQ2560X_LIMIT_CURRENT_OFFSET;
+	dev_info(info->dev, "set limit current reg_val = %#x, actual_limit_cur = %d\n",
+		 reg_val, info->actual_limit_cur);
+
+out:
+	mutex_unlock(&info->input_limit_cur_lock);
 
 	return ret;
 }
 
-static u32
-bq2560x_charger_get_limit_current(struct bq2560x_charger_info *info,
-				  u32 *limit_cur)
+static u32 bq2560x_charger_get_limit_current(struct bq2560x_charger_info *info, u32 *limit_cur)
 {
 	u8 reg_val;
 	int ret;
@@ -677,21 +912,9 @@ bq2560x_charger_get_limit_current(struct bq2560x_charger_info *info,
 	return 0;
 }
 
-static int bq2560x_charger_get_health(struct bq2560x_charger_info *info,
-				      u32 *health)
+static int bq2560x_charger_get_health(struct bq2560x_charger_info *info, u32 *health)
 {
 	*health = POWER_SUPPLY_HEALTH_GOOD;
-
-	return 0;
-}
-
-static int bq2560x_charger_get_online(struct bq2560x_charger_info *info,
-				      u32 *online)
-{
-	if (info->limit)
-		*online = true;
-	else
-		*online = false;
 
 	return 0;
 }
@@ -718,8 +941,7 @@ static void bq2560x_dump_register(struct bq2560x_charger_info *info)
 
 static int bq2560x_charger_feed_watchdog(struct bq2560x_charger_info *info)
 {
-	int ret;
-	u32 limit_cur = 0;
+	int ret = 0;
 
 	ret = bq2560x_update_bits(info, BQ2560X_REG_1,
 				  BQ2560X_REG_RESET_MASK,
@@ -730,24 +952,13 @@ static int bq2560x_charger_feed_watchdog(struct bq2560x_charger_info *info)
 	}
 
 	if (info->otg_enable)
-		return 0;
-
-	ret = bq2560x_charger_get_limit_current(info, &limit_cur);
-	if (ret) {
-		dev_err(info->dev, "get limit cur failed\n");
 		return ret;
-	}
 
-	if (info->actual_limit_cur == limit_cur)
-		return 0;
-
-	ret = bq2560x_charger_set_limit_current(info, info->actual_limit_cur);
-	if (ret) {
+	ret = bq2560x_charger_set_limit_current(info, 0, true);
+	if (ret)
 		dev_err(info->dev, "set limit cur failed\n");
-		return ret;
-	}
 
-	return 0;
+	return ret;
 }
 
 static irqreturn_t bq2560x_int_handler(int irq, void *dev_id)
@@ -805,6 +1016,26 @@ static int bq2560x_charger_set_power_path_status(struct bq2560x_charger_info *in
 	if (ret)
 		dev_err(info->dev, "%s HIZ mode failed, ret = %d\n",
 			enable ? "Enable" : "Disable", ret);
+
+	return ret;
+}
+
+static int bq2560x_charger_check_power_path_status(struct bq2560x_charger_info *info)
+{
+	int ret = 0;
+
+	if (info->disable_power_path)
+		return 0;
+
+	if (bq2560x_charger_get_power_path_status(info))
+		return 0;
+
+	dev_info(info->dev, "%s:line%d, disable HIZ\n", __func__, __LINE__);
+
+	ret = bq2560x_update_bits(info, BQ2560X_REG_0,
+				  BQ2560X_REG_EN_HIZ_MASK, 0);
+	if (ret)
+		dev_err(info->dev, "disable HIZ mode failed, ret = %d\n", ret);
 
 	return ret;
 }
@@ -871,9 +1102,18 @@ static int bq2560x_charger_set_status(struct bq2560x_charger_info *info,
 	if (val > CM_FAST_CHARGE_NORMAL_CMD)
 		return 0;
 
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+	if (val && info->runin_stop)
+		return 0;
+#endif
+
 	if (!val && info->charging) {
 		bq2560x_check_wireless_charge(info, false);
+#ifdef ZTE_CHARGER_NO_BATTERY
+		bq2560x_charger_stop_charge(info);
+#else
 		bq2560x_charger_stop_charge(info, bat_present);
+#endif
 		info->charging = false;
 	} else if (val && !info->charging) {
 		bq2560x_check_wireless_charge(info, true);
@@ -887,26 +1127,43 @@ static int bq2560x_charger_set_status(struct bq2560x_charger_info *info,
 	return ret;
 }
 
-static void bq2560x_charger_work(struct work_struct *data)
+static void __maybe_unused bq2560x_stop_charge_now(struct bq2560x_charger_info *info)
 {
-	struct bq2560x_charger_info *info =
-		container_of(data, struct bq2560x_charger_info, work);
-	bool present = bq2560x_charger_is_bat_present(info);
+#ifdef ZTE_CHARGER_NO_BATTERY
+	bq2560x_charger_stop_charge(info);
+#else
+	bq2560x_charger_stop_charge(info, bq2560x_charger_is_bat_present(info));
+#endif
+}
 
-	if (!info) {
-		pr_err("%s:line%d: NULL pointer!!!\n", __func__, __LINE__);
-		return;
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+/* Same logic as the 4.14 bq2560x_charger_set_runin_stop() */
+static int bq2560x_charger_set_runin_stop(struct bq2560x_charger_info *info,
+					  int val)
+{
+	int ret = 0;
+
+	if (!val && info->charging) {
+		info->runin_stop = true;
+
+		ret = bq2560x_charger_set_power_path_status(info, false);
+		if (ret)
+			dev_err(info->dev, "enable HIZ mode failed\n");
+
+		bq2560x_stop_charge_now(info);
+		info->charging = false;
+	} else if (val && !info->charging) {
+		info->runin_stop = false;
+		ret = bq2560x_charger_start_charge(info);
+		if (ret)
+			dev_err(info->dev, "start charge failed\n");
+		else
+			info->charging = true;
 	}
 
-	if (info->limit)
-		schedule_delayed_work(&info->wdt_work, 0);
-	else
-		cancel_delayed_work_sync(&info->wdt_work);
-
-	dev_info(info->dev, "battery present = %d, charger type = %d, limit = %d\n",
-		 present, info->usb_phy->chg_type, info->limit);
-	cm_notify_event(info->psy_usb, CM_EVENT_CHG_START_STOP, NULL);
+	return ret;
 }
+#endif
 
 static void bq2560x_current_work(struct work_struct *data)
 {
@@ -929,7 +1186,7 @@ static void bq2560x_current_work(struct work_struct *data)
 	}
 
 	if (info->current_input_limit_cur > info->new_input_limit_cur) {
-		ret = bq2560x_charger_set_limit_current(info, info->new_input_limit_cur);
+		ret = bq2560x_charger_set_limit_current(info, info->new_input_limit_cur, false);
 		if (ret < 0)
 			dev_err(info->dev, "%s: set input limit cur failed\n", __func__);
 		return;
@@ -953,225 +1210,16 @@ static void bq2560x_current_work(struct work_struct *data)
 		return;
 	}
 
-	ret = bq2560x_charger_set_limit_current(info, info->current_input_limit_cur);
+	ret = bq2560x_charger_set_limit_current(info, info->current_input_limit_cur, false);
 	if (ret < 0) {
 		dev_err(info->dev, "set input limit current failed\n");
 		return;
 	}
 
 	dev_info(info->dev, "set charge_limit_cur %duA, input_limit_curr %duA\n",
-		info->current_charge_limit_cur, info->current_input_limit_cur);
+		 info->current_charge_limit_cur, info->current_input_limit_cur);
 
 	schedule_delayed_work(&info->cur_work, BQ2560X_CURRENT_WORK_MS);
-}
-
-#if IS_ENABLED(CONFIG_SC27XX_PD)
-static int bq2560x_charger_pd_extcon_event(struct notifier_block *nb,
-					   unsigned long event, void *param)
-{
-	struct bq2560x_charger_info *info =
-		container_of(nb, struct bq2560x_charger_info, pd_extcon_nb);
-
-	if (info->pd_hard_reset) {
-		dev_info(info->dev, "Already receive USB PD hard reset\n");
-		return NOTIFY_OK;
-	}
-
-	info->pd_hard_reset = true;
-	dev_info(info->dev, "Receive USB PD hard reset request\n");
-	schedule_delayed_work(&info->pd_hard_reset_work,
-			      msecs_to_jiffies(BQ2560X_PD_HARD_RESET_MS));
-
-	return NOTIFY_OK;
-}
-
-static void bq2560x_charger_detect_pd_extcon_status(struct bq2560x_charger_info *info)
-{
-	if (!info->pd_extcon_enable)
-		return;
-
-	if (extcon_get_state(info->pd_extcon, EXTCON_CHG_USB_PD)) {
-		info->pd_hard_reset = true;
-		dev_info(info->dev, "Detect USB PD hard reset request\n");
-		schedule_delayed_work(&info->pd_hard_reset_work,
-				      msecs_to_jiffies(BQ2560X_PD_HARD_RESET_MS));
-	}
-}
-
-static void bq2560x_charger_pd_hard_reset_work(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct bq2560x_charger_info *info = container_of(dwork,
-			struct bq2560x_charger_info, pd_hard_reset_work);
-
-	if (!info->pd_hard_reset) {
-		if (info->usb_phy->chg_state == USB_CHARGER_PRESENT)
-			return;
-
-		dev_info(info->dev, "Not USB PD hard reset, charger out\n");
-
-		info->limit = 0;
-		schedule_work(&info->work);
-	}
-	info->pd_hard_reset = false;
-}
-
-static int bq2560x_charger_register_pd_extcon(struct device *dev,
-					      struct bq2560x_charger_info *info)
-{
-	int ret = 0;
-
-	info->pd_extcon_enable = device_property_read_bool(dev, "pd-extcon-enable");
-
-	if (!info->pd_extcon_enable)
-		return 0;
-
-	INIT_DELAYED_WORK(&info->pd_hard_reset_work, bq2560x_charger_pd_hard_reset_work);
-
-	if (of_property_read_bool(dev->of_node, "extcon")) {
-		info->pd_extcon = extcon_get_edev_by_phandle(dev, 1);
-		if (IS_ERR(info->pd_extcon)) {
-			dev_err(info->dev, "failed to find pd extcon device.\n");
-			return -EPROBE_DEFER;
-		}
-
-		info->pd_extcon_nb.notifier_call = bq2560x_charger_pd_extcon_event;
-		ret = devm_extcon_register_notifier_all(dev,
-							info->pd_extcon,
-							&info->pd_extcon_nb);
-		if (ret)
-			dev_err(info->dev, "Can't register pd extcon\n");
-	}
-
-	return ret;
-}
-
-static void bq2560x_charger_typec_extcon_work(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct bq2560x_charger_info *info =
-		container_of(dwork, struct bq2560x_charger_info, typec_extcon_work);
-
-	if (!extcon_get_state(info->typec_extcon, EXTCON_USB)) {
-		info->limit = 0;
-		info->typec_online = false;
-		pm_wakeup_event(info->dev, BQ2560X_WAKE_UP_MS);
-		dev_info(info->dev, "typec disconnect while pd hard reset.\n");
-		schedule_work(&info->work);
-	}
-}
-
-static int bq2560x_charger_typec_extcon_event(struct notifier_block *nb,
-					      unsigned long event, void *param)
-{
-	struct bq2560x_charger_info *info =
-		container_of(nb, struct bq2560x_charger_info, typec_extcon_nb);
-
-	if (info->typec_online) {
-		dev_info(info->dev, "typec status change.\n");
-		schedule_delayed_work(&info->typec_extcon_work, 0);
-	}
-
-	return NOTIFY_OK;
-}
-
-static int bq2560x_charger_register_typec_extcon(struct device *dev,
-						 struct bq2560x_charger_info *info)
-{
-	int ret = 0;
-
-	if (!info->pd_extcon_enable)
-		return 0;
-
-	INIT_DELAYED_WORK(&info->typec_extcon_work, bq2560x_charger_typec_extcon_work);
-
-	if (of_property_read_bool(dev->of_node, "extcon")) {
-		info->typec_extcon = extcon_get_edev_by_phandle(dev, 0);
-		if (IS_ERR(info->typec_extcon)) {
-			dev_err(info->dev, "failed to find typec extcon device.\n");
-			return -EPROBE_DEFER;
-		}
-
-		info->typec_extcon_nb.notifier_call = bq2560x_charger_typec_extcon_event;
-		ret = devm_extcon_register_notifier_all(dev,
-							info->typec_extcon,
-							&info->typec_extcon_nb);
-		if (ret) {
-			dev_err(info->dev, "Can't register typec extcon\n");
-			return ret;
-		}
-	}
-	
-
-	return 0;
-}
-#else
-static void bq2560x_charger_detect_pd_extcon_status(struct bq2560x_charger_info *info)
-{
-
-}
-
-static int bq2560x_charger_register_pd_extcon(struct device *dev,
-					      struct bq2560x_charger_info *info)
-{
-	return 0;
-}
-
-static int bq2560x_charger_register_typec_extcon(struct device *dev,
-						 struct bq2560x_charger_info *info)
-{
-	return 0;
-}
-#endif
-
-static int bq2560x_charger_usb_change(struct notifier_block *nb,
-				      unsigned long limit, void *data)
-{
-	struct bq2560x_charger_info *info =
-		container_of(nb, struct bq2560x_charger_info, usb_notify);
-
-	if (!info) {
-		pr_err("%s:line%d: NULL pointer!!!\n", __func__, __LINE__);
-		return NOTIFY_OK;
-	}
-
-	/*
-	 * only master should do work when vbus change.
-	 * let info->limit = limit, slave will online, too.
-	 */
-	if (info->role == BQ2560X_ROLE_SLAVE)
-		return NOTIFY_OK;
-
-	if (!info->pd_hard_reset) {
-		info->limit = limit;
-		if (info->typec_online) {
-			info->typec_online = false;
-			dev_info(info->dev, "typec not disconnect while pd hard reset.\n");
-		}
-
-		pm_wakeup_event(info->dev, BQ2560X_WAKE_UP_MS);
-
-		schedule_work(&info->work);
-	} else {
-		info->pd_hard_reset = false;
-		if (info->usb_phy->chg_state == USB_CHARGER_PRESENT) {
-			dev_err(info->dev, "The adapter is not PD adapter.\n");
-			info->limit = limit;
-			pm_wakeup_event(info->dev, BQ2560X_WAKE_UP_MS);
-			schedule_work(&info->work);
-		} else if (!extcon_get_state(info->typec_extcon, EXTCON_USB)) {
-			dev_err(info->dev, "typec disconnect before pd hard reset.\n");
-			info->limit = 0;
-			pm_wakeup_event(info->dev, BQ2560X_WAKE_UP_MS);
-			schedule_work(&info->work);
-		} else {
-			info->typec_online = true;
-			dev_err(info->dev, "USB PD hard reset, ignore vbus off\n");
-			cancel_delayed_work_sync(&info->pd_hard_reset_work);
-		}
-	}
-
-	return NOTIFY_OK;
 }
 
 static int bq2560x_charger_usb_get_property(struct power_supply *psy,
@@ -1179,8 +1227,7 @@ static int bq2560x_charger_usb_get_property(struct power_supply *psy,
 					    union power_supply_propval *val)
 {
 	struct bq2560x_charger_info *info = power_supply_get_drvdata(psy);
-	u32 cur = 0, online, health, enabled = 0;
-	enum usb_charger_type type;
+	u32 cur = 0, health, enabled = 0;
 	int ret = 0;
 
 	if (!info) {
@@ -1198,10 +1245,7 @@ static int bq2560x_charger_usb_get_property(struct power_supply *psy,
 			break;
 		}
 
-		if (info->limit || info->is_wireless_charge)
-			val->intval = bq2560x_charger_get_status(info);
-		else
-			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		val->intval = bq2560x_charger_get_status(info);
 		break;
 
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
@@ -1228,15 +1272,6 @@ static int bq2560x_charger_usb_get_property(struct power_supply *psy,
 		}
 		break;
 
-	case POWER_SUPPLY_PROP_ONLINE:
-		ret = bq2560x_charger_get_online(info, &online);
-		if (ret)
-			goto out;
-
-		val->intval = online;
-
-		break;
-
 	case POWER_SUPPLY_PROP_HEALTH:
 		if (info->charging) {
 			val->intval = 0;
@@ -1247,30 +1282,6 @@ static int bq2560x_charger_usb_get_property(struct power_supply *psy,
 
 			val->intval = health;
 		}
-		break;
-
-	case POWER_SUPPLY_PROP_USB_TYPE:
-		//val->intval = POWER_SUPPLY_USB_TYPE_DCP;
-		type = info->usb_phy->chg_type;
-
-		switch (type) {
-		case SDP_TYPE:
-			val->intval = POWER_SUPPLY_USB_TYPE_SDP;
-			break;
-
-		case DCP_TYPE:
-			val->intval = POWER_SUPPLY_USB_TYPE_DCP;
-			break;
-
-		case CDP_TYPE:
-			val->intval = POWER_SUPPLY_USB_TYPE_CDP;
-			break;
-
-		default:
-			val->intval = POWER_SUPPLY_USB_TYPE_UNKNOWN;
-		}
-		
-
 		break;
 
 	case POWER_SUPPLY_PROP_CALIBRATE:
@@ -1287,6 +1298,11 @@ static int bq2560x_charger_usb_get_property(struct power_supply *psy,
 		}
 
 		break;
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+	case POWER_SUPPLY_PROP_RUNIN_STOP:
+		val->intval = bq2560x_charger_get_status(info);
+		break;
+#endif
 	default:
 		ret = -EINVAL;
 	}
@@ -1297,8 +1313,8 @@ out:
 }
 
 static int bq2560x_charger_usb_set_property(struct power_supply *psy,
-				enum power_supply_property psp,
-				const union power_supply_propval *val)
+					    enum power_supply_property psp,
+					    const union power_supply_propval *val)
 {
 	struct bq2560x_charger_info *info = power_supply_get_drvdata(psy);
 	int ret = 0;
@@ -1348,7 +1364,7 @@ static int bq2560x_charger_usb_set_property(struct power_supply *psy,
 			break;
 		}
 
-		ret = bq2560x_charger_set_limit_current(info, val->intval);
+		ret = bq2560x_charger_set_limit_current(info, val->intval, false);
 		if (ret < 0)
 			dev_err(info->dev, "set input current limit failed\n");
 		break;
@@ -1374,6 +1390,10 @@ static int bq2560x_charger_usb_set_property(struct power_supply *psy,
 		break;
 
 	case POWER_SUPPLY_PROP_CALIBRATE:
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+		if (val->intval == true && info->runin_stop)
+			break;
+#endif
 		if (val->intval == true) {
 			bq2560x_check_wireless_charge(info, true);
 			ret = bq2560x_charger_start_charge(info);
@@ -1381,7 +1401,11 @@ static int bq2560x_charger_usb_set_property(struct power_supply *psy,
 				dev_err(info->dev, "start charge failed\n");
 		} else if (val->intval == false) {
 			bq2560x_check_wireless_charge(info, false);
+#ifdef ZTE_CHARGER_NO_BATTERY
+			bq2560x_charger_stop_charge(info);
+#else
 			bq2560x_charger_stop_charge(info, bat_present);
+#endif
 		}
 		break;
 	case POWER_SUPPLY_PROP_TYPE:
@@ -1399,6 +1423,22 @@ static int bq2560x_charger_usb_set_property(struct power_supply *psy,
 			dev_err(info->dev, "failed to set fast charge ovp\n");
 
 		break;
+	case POWER_SUPPLY_PROP_PRESENT:
+		info->is_charger_online = val->intval;
+		if (val->intval == true) {
+			schedule_delayed_work(&info->wdt_work, 0);
+		} else {
+			info->actual_limit_cur = 0;
+			cancel_delayed_work_sync(&info->wdt_work);
+		}
+		break;
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+	case POWER_SUPPLY_PROP_RUNIN_STOP:
+		ret = bq2560x_charger_set_runin_stop(info, val->intval);
+		if (ret < 0)
+			dev_err(info->dev, "failed to set runin stop\n");
+		break;
+#endif
 	default:
 		ret = -EINVAL;
 	}
@@ -1418,6 +1458,10 @@ static int bq2560x_charger_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CALIBRATE:
 	case POWER_SUPPLY_PROP_TYPE:
 	case POWER_SUPPLY_PROP_STATUS:
+	case POWER_SUPPLY_PROP_PRESENT:
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+	case POWER_SUPPLY_PROP_RUNIN_STOP:
+#endif
 		ret = 1;
 		break;
 
@@ -1428,50 +1472,36 @@ static int bq2560x_charger_property_is_writeable(struct power_supply *psy,
 	return ret;
 }
 
-static enum power_supply_usb_type bq2560x_charger_usb_types[] = {
-	POWER_SUPPLY_USB_TYPE_UNKNOWN,
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-	POWER_SUPPLY_USB_TYPE_C,
-	POWER_SUPPLY_USB_TYPE_PD,
-	POWER_SUPPLY_USB_TYPE_PD_DRP,
-	POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID
-};
-
 static enum power_supply_property bq2560x_usb_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
-	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_HEALTH,
-	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_CALIBRATE,
 	POWER_SUPPLY_PROP_TYPE,
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+	POWER_SUPPLY_PROP_RUNIN_STOP,
+#endif
 };
 
 static const struct power_supply_desc bq2560x_charger_desc = {
 	.name			= "bq2560x_charger",
-	.type			= POWER_SUPPLY_TYPE_USB,
+	.type			= POWER_SUPPLY_TYPE_UNKNOWN,
 	.properties		= bq2560x_usb_props,
 	.num_properties		= ARRAY_SIZE(bq2560x_usb_props),
 	.get_property		= bq2560x_charger_usb_get_property,
 	.set_property		= bq2560x_charger_usb_set_property,
 	.property_is_writeable	= bq2560x_charger_property_is_writeable,
-	.usb_types		= bq2560x_charger_usb_types,
-	.num_usb_types		= ARRAY_SIZE(bq2560x_charger_usb_types),
 };
 
 static const struct power_supply_desc bq2560x_slave_charger_desc = {
 	.name			= "bq2560x_slave_charger",
-	.type			= POWER_SUPPLY_TYPE_USB,
+	.type			= POWER_SUPPLY_TYPE_UNKNOWN,
 	.properties		= bq2560x_usb_props,
 	.num_properties		= ARRAY_SIZE(bq2560x_usb_props),
 	.get_property		= bq2560x_charger_usb_get_property,
 	.set_property		= bq2560x_charger_usb_set_property,
 	.property_is_writeable	= bq2560x_charger_property_is_writeable,
-	.usb_types		= bq2560x_charger_usb_types,
-	.num_usb_types		= ARRAY_SIZE(bq2560x_charger_usb_types),
 };
 
 static ssize_t bq2560x_register_value_show(struct device *dev,
@@ -1676,31 +1706,6 @@ static int bq2560x_register_sysfs(struct bq2560x_charger_info *info)
 	return ret;
 }
 
-static void bq2560x_charger_detect_status(struct bq2560x_charger_info *info)
-{
-	unsigned int min, max;
-
-	/*
-	 * If the USB charger status has been USB_CHARGER_PRESENT before
-	 * registering the notifier, we should start to charge with getting
-	 * the charge current.
-	 */
-	if (info->usb_phy->chg_state != USB_CHARGER_PRESENT)
-		return;
-
-	usb_phy_get_charger_current(info->usb_phy, &min, &max);
-	info->limit = min;
-
-	/*
-	 * slave no need to start charge when vbus change.
-	 * due to charging in shut down will check each psy
-	 * whether online or not, so let info->limit = min.
-	 */
-	if (info->role == BQ2560X_ROLE_SLAVE)
-		return;
-	schedule_work(&info->work);
-}
-
 static void
 bq2560x_charger_feed_watchdog_work(struct work_struct *work)
 {
@@ -1710,11 +1715,21 @@ bq2560x_charger_feed_watchdog_work(struct work_struct *work)
 							 wdt_work);
 	int ret;
 
+#ifdef ZTE_CHARGER_NO_BATTERY
+	bq2560x_charger_stop_charge(info);
+	ret = bq2560x_set_watch_dog_timer(info, 0);
+	if (ret)
+		schedule_delayed_work(&info->wdt_work, HZ * 5);
+	else
+		schedule_delayed_work(&info->wdt_work, HZ * 15);
+#else
 	ret = bq2560x_charger_feed_watchdog(info);
 	if (ret)
 		schedule_delayed_work(&info->wdt_work, HZ * 5);
 	else
 		schedule_delayed_work(&info->wdt_work, HZ * 15);
+
+#endif
 }
 
 #if IS_ENABLED(CONFIG_REGULATOR)
@@ -1773,6 +1788,7 @@ static void bq2560x_charger_otg_work(struct work_struct *work)
 	do {
 		otg_fault = bq2560x_charger_check_otg_fault(info);
 		if (!otg_fault) {
+			dev_dbg(info->dev, "%s:line%d:restart charger otg\n", __func__, __LINE__);
 			ret = bq2560x_update_bits(info, BQ2560X_REG_1,
 						  BQ2560X_REG_OTG_MASK,
 						  BQ2560X_REG_OTG_MASK);
@@ -1789,6 +1805,7 @@ static void bq2560x_charger_otg_work(struct work_struct *work)
 	}
 
 out:
+	dev_dbg(info->dev, "%s:line%d:schedule_work\n", __func__, __LINE__);
 	schedule_delayed_work(&info->otg_work, msecs_to_jiffies(1500));
 }
 
@@ -1808,11 +1825,13 @@ static int bq2560x_charger_enable_otg(struct regulator_dev *dev)
 	 * Disable charger detection function in case
 	 * affecting the OTG timing sequence.
 	 */
-	ret = regmap_update_bits(info->pmic, info->charger_detect,
-				 BIT_DP_DM_BC_ENB, BIT_DP_DM_BC_ENB);
-	if (ret) {
-		dev_err(info->dev, "failed to disable bc1.2 detect function.\n");
-		goto out;
+	if (!info->use_typec_extcon) {
+		ret = regmap_update_bits(info->pmic, info->charger_detect,
+					 BIT_DP_DM_BC_ENB, BIT_DP_DM_BC_ENB);
+		if (ret) {
+			dev_err(info->dev, "failed to disable bc1.2 detect function.\n");
+			goto out;
+		}
 	}
 
 	ret = bq2560x_update_bits(info, BQ2560X_REG_1,
@@ -1825,6 +1844,10 @@ static int bq2560x_charger_enable_otg(struct regulator_dev *dev)
 		goto out;
 	}
 
+	ret = bq2560x_charger_set_power_path_status(info, true);
+	if (ret)
+		dev_err(info->dev, "Failed to enable power path\n");
+
 	info->otg_enable = true;
 	schedule_delayed_work(&info->wdt_work,
 			      msecs_to_jiffies(BQ2560X_FEED_WATCHDOG_VALID_MS));
@@ -1832,6 +1855,8 @@ static int bq2560x_charger_enable_otg(struct regulator_dev *dev)
 			      msecs_to_jiffies(BQ2560X_OTG_VALID_MS));
 out:
 	mutex_unlock(&info->lock);
+	dev_info(info->dev, "%s:line%d:enable_otg\n", __func__, __LINE__);
+
 	return ret;
 }
 
@@ -1859,12 +1884,16 @@ static int bq2560x_charger_disable_otg(struct regulator_dev *dev)
 	}
 
 	/* Enable charger detection function to identify the charger type */
-	ret = regmap_update_bits(info->pmic, info->charger_detect, BIT_DP_DM_BC_ENB, 0);
-	if (ret)
-		dev_err(info->dev, "enable BC1.2 failed\n");
+	if (!info->use_typec_extcon) {
+		ret = regmap_update_bits(info->pmic, info->charger_detect, BIT_DP_DM_BC_ENB, 0);
+		if (ret)
+			dev_err(info->dev, "enable BC1.2 failed\n");
+	}
 
 out:
 	mutex_unlock(&info->lock);
+	dev_info(info->dev, "%s:line%d:disable_otg\n", __func__, __LINE__);
+
 	return ret;
 
 
@@ -1893,6 +1922,8 @@ static int bq2560x_charger_vbus_is_enabled(struct regulator_dev *dev)
 	val &= BQ2560X_REG_OTG_MASK;
 
 	mutex_unlock(&info->lock);
+	dev_dbg(info->dev, "%s:line%d:vbus_is_enabled\n", __func__, __LINE__);
+
 	return val;
 }
 
@@ -1939,6 +1970,117 @@ bq2560x_charger_register_vbus_regulator(struct bq2560x_charger_info *info)
 }
 #endif
 
+static int bq2560x_get_chip_vendor_id(struct bq2560x_charger_info *info)
+{
+	u8 reg_value = 0;
+	u8 pn = 0, sub_id = 0, addr_change = 0;
+	int ret = -1;
+
+	ret = bq2560x_read(info, BQ2560X_REG_0B, &reg_value);
+
+	pn = (reg_value & BQ2560X_REG0B_PN_MASK) >> BQ2560X_REG0B_PN_SHIFT;
+	sub_id = (reg_value & BQ2560X_REG0B_VENDOR_ID_MASK) >> BQ2560X_REG0B_VENDOR_ID_SHIFT;
+
+	if (ret < 0) {
+		pr_err("%s: failed to get vendor id ret=%d\n", __func__, ret);
+		info->chip_main_id = -1;
+		info->chip_sub_id = -1;
+		info->client->addr = SGM41513_I2C_ADDR;
+		addr_change = 1;
+	} else {
+		info->chip_main_id = pn;
+		info->chip_sub_id = sub_id;
+	}
+
+	if (addr_change) {
+		ret = bq2560x_read(info, BQ2560X_REG_0B, &reg_value);
+
+		pn = (reg_value & BQ2560X_REG0B_PN_MASK) >> BQ2560X_REG0B_PN_SHIFT;
+		sub_id = (reg_value & BQ2560X_REG0B_VENDOR_ID_MASK) >> BQ2560X_REG0B_VENDOR_ID_SHIFT;
+
+		if (ret < 0) {
+			pr_err("%s: failed to get vendor id ret1=%d\n", __func__, ret);
+			info->chip_main_id = -1;
+			info->chip_sub_id = -1;
+		} else {
+			info->chip_main_id = pn;
+			info->chip_sub_id = sub_id;
+		}
+		addr_change = 0;
+	}
+
+	if (info->chip_main_id == 0) {
+		info->name = "sgm41513";
+	}  else if (info->chip_main_id == 1) {
+		info->name = "sgm41513A";
+	} else if (info->chip_main_id == 2) {
+		if (info->chip_sub_id == 1)
+			info->name = "sgm41511";
+		else
+			info->name = "bq25601";
+	} else if (info->chip_main_id == 9) {
+		info->name = "sy6974";
+	} else {
+		info->name = "unkown";
+	}
+	pr_info("%s reg=0x%x, value=0x%x pn=0x%x sub_id=0x%x chg_IC_name=%s\n",
+		__func__, BQ2560X_REG_0B, reg_value, pn, sub_id, info->name);
+
+	return ret;
+}
+
+
+#if BQ2560X_KEEP_4_14_SYMBOLS
+void bq2560x_dump_regs(struct bq2560x_charger_info *info)
+{
+	bq2560x_dump_register(info);
+}
+EXPORT_SYMBOL_GPL(bq2560x_dump_regs);
+
+void charger_dev_stop_charge(struct bq2560x_charger_info *info)
+{
+	if (!info)
+		return;
+
+	mutex_lock(&info->lock);
+	bq2560x_stop_charge_now(info);
+	mutex_unlock(&info->lock);
+}
+EXPORT_SYMBOL_GPL(charger_dev_stop_charge);
+
+int charger_dev_start_charge(struct bq2560x_charger_info *info)
+{
+	int ret;
+
+	if (!info)
+		return -EINVAL;
+
+	mutex_lock(&info->lock);
+	ret = bq2560x_charger_start_charge(info);
+	mutex_unlock(&info->lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(charger_dev_start_charge);
+
+#ifdef BQ2560X_SUPPORT_RUNIN_STOP
+void charger_dev_disable_charge(struct bq2560x_charger_info *info, bool enable)
+{
+	int ret;
+
+	if (!info)
+		return;
+
+	mutex_lock(&info->lock);
+	ret = bq2560x_charger_set_runin_stop(info, enable ? 0 : 1);
+	mutex_unlock(&info->lock);
+	if (ret)
+		dev_err(info->dev, "disable_charge error\n");
+}
+EXPORT_SYMBOL_GPL(charger_dev_disable_charge);
+#endif
+#endif /* BQ2560X_KEEP_4_14_SYMBOLS */
+
 static int bq2560x_charger_probe(struct i2c_client *client,
 		const struct i2c_device_id *id)
 {
@@ -1951,7 +2093,7 @@ static int bq2560x_charger_probe(struct i2c_client *client,
 	int ret;
 	bool bat_present;
 
-	printk(KERN_ERR "BQ2560X: Start probe...\n");
+	pr_info("%s enter\n", __func__);
 
 	if (!adapter) {
 		pr_err("%s:line%d: NULL pointer!!!\n", __func__, __LINE__);
@@ -1973,40 +2115,15 @@ static int bq2560x_charger_probe(struct i2c_client *client,
 	i2c_set_clientdata(client, info);
 	power_path_control(info);
 
-	info->usb_phy = devm_usb_get_phy_by_phandle(dev, "phys", 0);
-	if (IS_ERR(info->usb_phy)) {
-		ret = PTR_ERR(info->usb_phy);
-		if (ret == -EPROBE_DEFER)
-			dev_info(dev, "USB phy not ready, deferring probe\n");
-		else
-			dev_err(dev, "failed to find USB phy: %d\n", ret);
-		return ret;
-		//info->usb_phy = NULL;
-	}
-
-	ret = bq2560x_charger_register_pd_extcon(info->dev, info);
-	if (ret) {
-		dev_err(info->dev, "failed to register pd extcon: %d\n", ret);
-		//return -EPROBE_DEFER;
-		//ret = 0;
-		return ret;
-	}
-
-	ret = bq2560x_charger_register_typec_extcon(info->dev, info);
-	if (ret) {
-		dev_err(info->dev, "failed to register typec extcon: %d\n", ret);
-		//return -EPROBE_DEFER;
-		//ret = 0;
-		return ret;
-	}
-
 	ret = bq2560x_charger_is_fgu_present(info);
 	if (ret) {
-		dev_err(dev, "sc27xx_fgu not ready: %d\n", ret);
-		//return -EPROBE_DEFER;
-		//ret = 0;
-		return ret;
+		dev_err(dev, "sc27xx_fgu not ready.\n");
+		return -EPROBE_DEFER;
 	}
+
+	info->use_typec_extcon = device_property_read_bool(dev, "use-typec-extcon");
+
+	bq2560x_get_chip_vendor_id(info);
 
 	ret = device_property_read_bool(dev, "role-slave");
 	if (ret)
@@ -2067,6 +2184,7 @@ static int bq2560x_charger_probe(struct i2c_client *client,
 	bat_present = bq2560x_charger_is_bat_present(info);
 
 	mutex_init(&info->lock);
+	mutex_init(&info->input_limit_cur_lock);
 	mutex_lock(&info->lock);
 
 	charger_cfg.drv_data = info;
@@ -2088,12 +2206,23 @@ static int bq2560x_charger_probe(struct i2c_client *client,
 	}
 
 	ret = bq2560x_charger_hw_init(info);
+#ifdef ZTE_FEATURE_NO_CHARGER
+	if (ret) {
+		dev_err(dev, "failed to bq2560x_charger_hw_init\n");
+	}
+#else
 	if (ret) {
 		dev_err(dev, "failed to bq2560x_charger_hw_init\n");
 		goto err_psy_usb;
 	}
+#endif
 
+#ifdef ZTE_CHARGER_NO_BATTERY
+	bq2560x_charger_stop_charge(info);
+#else
 	bq2560x_charger_stop_charge(info, bat_present);
+#endif
+	bq2560x_charger_check_power_path_status(info);
 
 	device_init_wakeup(info->dev, true);
 
@@ -2112,20 +2241,8 @@ static int bq2560x_charger_probe(struct i2c_client *client,
 		}
 	}
 
-	INIT_WORK(&info->work, bq2560x_charger_work);
 	INIT_DELAYED_WORK(&info->cur_work, bq2560x_current_work);
 
-	info->usb_notify.notifier_call = bq2560x_charger_usb_change;
-	if (info->usb_phy) {
-		ret = usb_register_notifier(info->usb_phy, &info->usb_notify);
-		if (ret) { 
-			dev_err(dev, "failed to register notifier:%d\n", ret);
-			goto err_psy_usb;
-		}
-	} else {
-		dev_info(dev, "USB PHY is NULL, skipping notifier\n");
-	}
-	
 	ret = bq2560x_register_sysfs(info);
 	if (ret) {
 		dev_err(info->dev, "register sysfs fail, ret = %d\n", ret);
@@ -2133,59 +2250,54 @@ static int bq2560x_charger_probe(struct i2c_client *client,
 	}
 
 	info->irq_gpio = of_get_named_gpio(info->dev->of_node, "irq-gpio", 0);
-	if (!gpio_is_valid(info->irq_gpio)) {
-		info->irq_gpio = of_get_named_gpio(info->dev->of_node, "bq2560x,irq-gpio", 0);
-	}
-
-	if (!gpio_is_valid(info->irq_gpio)) {
-		info->irq_gpio = 176;
-		dev_warn(dev, "[HACK] DTS irq-gpio fail, forcing PMIC VBUS GPIO 176\n");
-	}
-	
 	if (gpio_is_valid(info->irq_gpio)) {
 		ret = devm_gpio_request_one(info->dev, info->irq_gpio,
 					    GPIOF_DIR_IN, "bq2560x_int");
-
-		if (ret && ret != -EBUSY)
+		if (!ret)
+			info->client->irq = gpio_to_irq(info->irq_gpio);
+		else
 			dev_err(dev, "int request failed, ret = %d\n", ret);
 
-		info->client->irq = gpio_to_irq(info->irq_gpio);
-		if (info->client->irq <= 0) {
-			dev_err(dev, "failed to get irq no (gpio_to_irq failed)\n");
-			info->irq_gpio = -EINVAL;
+		if (info->client->irq < 0) {
+			dev_err(dev, "failed to get irq no\n");
+			gpio_free(info->irq_gpio);
 		} else {
 			ret = devm_request_threaded_irq(&info->client->dev, info->client->irq,
 							NULL, bq2560x_int_handler,
-							IRQF_TRIGGER_FALLING | IRQF_ONESHOT | IRQF_SHARED,
+							IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 							"bq2560x interrupt", info);
-			if (ret) {
-				dev_err(info->dev, "Failed irq = %d ret = %d\n", info->client->irq, ret);
-			} else {
-				dev_info(info->dev, "[HACK] Success registered IRQ %d for GPIO %d\n", 
-					 info->client->irq, info->irq_gpio);
+			if (ret)
+				dev_err(info->dev, "Failed irq = %d ret = %d\n",
+					info->client->irq, ret);
+			else
 				enable_irq_wake(client->irq);
-			}
 		}
 	} else {
 		dev_err(dev, "failed to get irq gpio\n");
-		info->irq_gpio = -EINVAL;
 	}
 
 	mutex_unlock(&info->lock);
-	bq2560x_charger_detect_status(info);
-	bq2560x_charger_detect_pd_extcon_status(info);
+#ifdef ZTE_CHARGER_NO_BATTERY
+	pr_info("%s zte charger no battery ok\n", __func__);
+	schedule_delayed_work(&info->wdt_work, msecs_to_jiffies(5000));
+#endif
+
+	pr_info("%s ok\n", __func__);
+	bq2560x_dump_register(info);
+	dev_info(dev, "use_typec_extcon = %d\n", info->use_typec_extcon);
+
+#if BQ2560X_KEEP_4_14_SYMBOLS
+	if (info->chip_main_id >= 0)
+		chipid_num = info->chip_main_id;
+	pinfo = info;
+#endif
 
 	return 0;
 
 error_sysfs:
 	sysfs_remove_group(&info->psy_usb->dev.kobj, &info->sysfs->attr_g);
-	if (info->usb_phy) {
-		usb_unregister_notifier(info->usb_phy, &info->usb_notify);
-	}
 err_psy_usb:
-	//if (info->irq_gpio)
-	//	gpio_free(info->irq_gpio);
-	if (gpio_is_valid(info->irq_gpio))
+	if (info->irq_gpio)
 		gpio_free(info->irq_gpio);
 err_regmap_exit:
 	mutex_unlock(&info->lock);
@@ -2208,6 +2320,10 @@ static void bq2560x_charger_shutdown(struct i2c_client *client)
 		if (ret)
 			dev_err(info->dev, "disable bq2560x otg failed ret = %d\n", ret);
 
+		ret = bq2560x_charger_set_power_path_status(info, false);
+		if (ret)
+			dev_err(info->dev, "Failed to disable power path\n");
+
 		/* Enable charger detection function to identify the charger type */
 		ret = regmap_update_bits(info->pmic, info->charger_detect,
 					 BIT_DP_DM_BC_ENB, 0);
@@ -2223,7 +2339,11 @@ static int bq2560x_charger_remove(struct i2c_client *client)
 
 	cancel_delayed_work_sync(&info->wdt_work);
 	cancel_delayed_work_sync(&info->otg_work);
-	usb_unregister_notifier(info->usb_phy, &info->usb_notify);
+
+#if BQ2560X_KEEP_4_14_SYMBOLS
+	if (pinfo == info)
+		pinfo = NULL;
+#endif
 
 	return 0;
 }
@@ -2233,14 +2353,12 @@ static int bq2560x_charger_suspend(struct device *dev)
 {
 	struct bq2560x_charger_info *info = dev_get_drvdata(dev);
 	ktime_t now, add;
-	unsigned int wakeup_ms = BQ2560X_OTG_ALARM_TIMER_MS;
 
 	if (!info) {
 		pr_err("%s:line%d: NULL pointer!!!\n", __func__, __LINE__);
 		return -EINVAL;
 	}
-
-	if (info->otg_enable || info->limit)
+	if (info->otg_enable || info->is_charger_online)
 		bq2560x_charger_feed_watchdog(info);
 
 	if (!info->otg_enable)
@@ -2250,8 +2368,7 @@ static int bq2560x_charger_suspend(struct device *dev)
 	cancel_delayed_work_sync(&info->cur_work);
 
 	now = ktime_get_boottime();
-	add = ktime_set(wakeup_ms / MSEC_PER_SEC,
-			(wakeup_ms % MSEC_PER_SEC) * NSEC_PER_MSEC);
+	add = ktime_set(BQ2560X_OTG_ALARM_TIMER_S, 0);
 	alarm_start(&info->otg_timer, ktime_add(now, add));
 
 	return 0;
@@ -2266,7 +2383,7 @@ static int bq2560x_charger_resume(struct device *dev)
 		return -EINVAL;
 	}
 
-	if (info->otg_enable || info->limit)
+	if (info->otg_enable || info->is_charger_online)
 		bq2560x_charger_feed_watchdog(info);
 
 	if (!info->otg_enable)
