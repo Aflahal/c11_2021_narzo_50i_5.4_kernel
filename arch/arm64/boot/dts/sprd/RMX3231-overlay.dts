@@ -35,8 +35,8 @@
 			#size-cells = <2>;
 
 			dtbo: dtbo {
-				compatible = "sprd,dtbo-test"
-				reg = <0x0 0x0 0x0 0x11>
+				compatible = "sprd,dtbo-test";
+				reg = <0x0 0x0 0x0 0x11>;
 			};
 
 			fingerprint@0 {
@@ -86,10 +86,10 @@
 			};
 
 			trfpa_thermistor: rf-sensor {
-				compatible = "generic-adc-thermal"
+				compatible = "generic-adc-thermal";
 				#thermal-sensor-cells = <0>;
-				io-channels = <&pmic_adc 2>
-				io-channel-names = "sensor-channel"
+				io-channels = <&pmic_adc 2>;
+				io-channel-names = "sensor-channel";
 				temperature-lookup-table = < (-39742) 1131
 							(-29777) 1110
 							(-19480) 1074
@@ -105,13 +105,13 @@
 							104880 75
 							114889 57
 							124872 43 >;
-			}
+			};
 
 			tchg_thermistor:chg-sensor {
-				compatible = "generic-adc-thermal"
+				compatible = "generic-adc-thermal";
 				#thermal-sensor-cells = <0>;
-				io-channels = <&pmic_adc 4>
-				io-channel-names = "sensor-channel"
+				io-channels = <&pmic_adc 4>;
+				io-channel-names = "sensor-channel";
 				temperature-lookup-table = < (-39742) 1131
 							(-29777) 1110
 							(-19480) 1074
@@ -127,20 +127,20 @@
 							104880 75
 							114889 57
 							124872 43 >;
-			}
+			};
 
 			/*still need change for bat1 & bat2*/
 			bat: battery {
 				compatible = "simple-battery";
 				charge-full-design-microamp-hours = <4901000>;
 				charge-term-current-microamp = <240000>;
-				constant_charge_voltage_max_microvolt = <4435000>;
+				constant-charge-voltage-max-microvolt = <4435000>;
 				factory-internal-resistance-micro-ohms = <128000>;
 				voltage-min-design-microvolt = <3450000>;
-				fullbat-voltage = <4410000>
-				fullbat-current = <260000>
+				fullbat-voltage = <4410000>;
+				fullbat-current = <260000>;
 				/*need change for fullbat-track-end-vol and fullbatt-track-end-cur*/
-				fullbat-track-end-vol = <4370000>
+				fullbat-track-end-vol = <4370000>;
 				fullbatt-track-end-cur = <260000>;
 				first-calib-voltage = <3600000>;
 				first-calib-capacity = <40>;
@@ -242,7 +242,7 @@
 			//	cm-cap-remap-table = <1 2 3>, <2 3 2>, <98 99 2>, <99 100 3>;
 
 				io-channels = <&pmic_adc 3>;
-				io-channel-names = "batt_id-channel";
+				io-channel-names = "bat-id-vol";
 				regulator@0 {
 					cm-regulator-name = "vddgen0";
 					cable@0 {
@@ -264,14 +264,6 @@
 				compatible = "gpio-keys";
 				pinctrl-names = "eic_dbc2";
 				pinctrl-0 = <&eic_dbc2>;
-
-				key-cut {
-					label = "Cut Key"
-					linux,code = <756>
-					gpios = <&ap_gpio 130 GPIO_ACTIVE_HIGH>
-					debounce-interval = <2>;
-					wakeup-source
-				}
 
 				key-volumedown {
 					label = "Volume Down Key";
@@ -444,7 +436,7 @@
               compatible = "ti,bq2560x_chg";
               reg = <0x6b>;
               phys = <&hsphy>;
-              monitored-battery = <&bat &bat2>;
+              monitored-battery = <&bat1 &bat2 &bat>;
               extcon = <&extcon_gpio>;
               vddvbus:otg-vbus{
                      regulator-name = "vddvbus";
