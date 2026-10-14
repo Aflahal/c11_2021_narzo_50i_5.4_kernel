@@ -68,10 +68,6 @@ static int sprd_battery_parse_cmdline_match(struct power_supply *psy,
 	return 0;
 }
 
-#define DESAY_COSMX_BATTERY_4890MAH_VOLTAGE_MAX  	200
-#define DESAY_COSMX_BATTERY_4890MAH_VOLTAGE_MIN  	20
-#define NVT_ATL_BATTERY_4890MAH_VOLTAGE_MAX  	500
-#define NVT_ATL_BATTERY_4890MAH_VOLTAGE_MIN  	300
 int sprd_battery_parse_battery_id(struct power_supply *psy)
 {
 	char *str = "bat.id=";
@@ -87,27 +83,12 @@ int sprd_battery_parse_battery_id(struct power_supply *psy)
 				ret, result);
 		}
 	}
-	dev_info(&psy->dev, "Batteryid vol= %d\n", id);
-
-	if (1) {
-		int id_vol;
-
-		id_vol = id;
-	    if ((id_vol >= DESAY_COSMX_BATTERY_4890MAH_VOLTAGE_MIN)&&(id_vol <= DESAY_COSMX_BATTERY_4890MAH_VOLTAGE_MAX)) {
-	    	id = 1;
-	    } else if((id_vol >= NVT_ATL_BATTERY_4890MAH_VOLTAGE_MIN)&&(id_vol <= NVT_ATL_BATTERY_4890MAH_VOLTAGE_MAX)){
-	    	id = 2;
-	    }else{
-	    	id = 3;
-	    }
-	}
 	dev_info(&psy->dev, "Batteryid = %d\n", id);
 
 	return id;
 }
 EXPORT_SYMBOL_GPL(sprd_battery_parse_battery_id);
 
-#ifdef CONFIG_TN_V5000_CHARGER_COMPATATION
 static int charger_id = 0xFF;
 static int sprd_charger_parse_cmdline_match(char *match_str, char *result, int size)
 {
@@ -180,7 +161,6 @@ int sprd_charger_parse_charger_id(void)
 	return charger_id;
 }
 EXPORT_SYMBOL_GPL(sprd_charger_parse_charger_id);
-#endif
 
 static bool sprd_battery_ocv_cap_table_check(struct power_supply *psy,
 					     struct sprd_battery_ocv_table *table,
@@ -367,6 +347,35 @@ static int sprd_battery_parse_battery_temp_capacity_table(struct sprd_battery_in
 		battery_temp_cap_table[index].temp = be32_to_cpu(*list++);
 		battery_temp_cap_table[index].cap = be32_to_cpu(*list++);
 	}
+
+
+	return 0;
+}
+
+static int sprd_battery_parse_dischg_battery_temp_capacity_table(struct sprd_battery_info *info,
+							  struct device_node *battery_np,
+							  struct power_supply *psy)
+{
+	struct sprd_battery_temp_cap_table *dischg_battery_temp_cap_table;
+	const __be32 *list;
+	int index, len;
+
+	list = of_get_property(battery_np, "dischg-capacity-temp-table", &len);
+	if (!list || !len)
+		return 0;
+
+	info->dischg_battery_temp_cap_table_len = len / (2 * sizeof(__be32));
+	dischg_battery_temp_cap_table = info->dischg_battery_temp_cap_table =
+		devm_kcalloc(&psy->dev, info->battery_temp_cap_table_len,
+			     sizeof(*dischg_battery_temp_cap_table), GFP_KERNEL);
+	if (!info->dischg_battery_temp_cap_table)
+		return -ENOMEM;
+
+	for (index = 0; index < info->dischg_battery_temp_cap_table_len; index++) {
+		dischg_battery_temp_cap_table[index].temp = be32_to_cpu(*list++);
+		dischg_battery_temp_cap_table[index].cap = be32_to_cpu(*list++);
+	}
+
 
 	return 0;
 }
@@ -767,19 +776,6 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 	const char *value;
 	int err, index, num = 0;
 
-	
-	// input battery_id : 0 , 1, 0xFF
-	dev_info(&psy->dev, "sprd_battery_get_battery_info battery_id= %d\n", battery_id);
-	if (battery_id == 0xFF){
-		int id;
-		id = sprd_battery_parse_battery_id(psy);
-		battery_id = 0;
-		if (id == 2)battery_id = 1;
-	}
-	num = battery_id;	
-
-    dev_info(&psy->dev, "sprd_battery_get_battery_info: num-%d\n", num);
-
 	info->charge_full_design_uah         = -EINVAL;
 	info->voltage_min_design_uv          = -EINVAL;
 	info->precharge_current_ua           = -EINVAL;
@@ -834,10 +830,10 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 		return -ENXIO;
 	}
 
-	#ifdef CONFIG_TN_V5000_CHARGER_COMPATATION
-	sprd_charger_parse_charger_id();
-	#endif
 	//battery_id = sprd_battery_parse_battery_id(psy);
+
+	if (battery_id == 2)
+		num = 1;
 
 	battery_np = of_parse_phandle(psy->of_node, "monitored-battery", num);
 	if (!battery_np) {
@@ -943,6 +939,12 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 		return err;
 	}
 
+	err = sprd_battery_parse_dischg_battery_temp_capacity_table(info, battery_np, psy);
+	if (err) {
+		dev_err(&psy->dev, "Fail to get dischg battery temp capacity table, ret = %d\n", err);
+		return err;
+	}
+
 	err = sprd_battery_parse_battery_resistance_temp_table(info, battery_np, psy);
 	if (err) {
 		dev_err(&psy->dev, "Fail to get battery resist temp table, ret = %d\n", err);
@@ -985,7 +987,6 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 		return err;
 	}
 
-dev_info(&psy->dev, "sprd_battery_get_battery_info: ok get info->charge_full_design_uah-%d\n", info->charge_full_design_uah);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sprd_battery_get_battery_info);
