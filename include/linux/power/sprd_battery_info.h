@@ -132,6 +132,7 @@ struct sprd_battery_info {
 	int first_capacity_calibration_capacity;
 
 	int force_jeita_status;
+	int bat_id;
 
 	/* celsius */
 	int battery_internal_resistance_temp_table[SPRD_BATTERY_INFO_RESISTENCE_TEMP_MAX];
@@ -156,6 +157,9 @@ struct sprd_battery_info {
 
 	struct sprd_battery_temp_cap_table *battery_temp_cap_table;
 	int battery_temp_cap_table_len;
+
+	struct sprd_battery_temp_cap_table *dischg_battery_temp_cap_table;
+	int dischg_battery_temp_cap_table_len;
 
 	struct sprd_battery_resistance_temp_table *battery_temp_resist_table;
 	int battery_temp_resist_table_len;
@@ -189,4 +193,3 @@ sprd_battery_find_ocv2cap_table(struct sprd_battery_info *info,
 				int temp, int *table_len);
 
 #endif /* _SPRD_BATTERY_INFO_H */
-
