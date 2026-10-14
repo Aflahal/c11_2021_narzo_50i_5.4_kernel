@@ -66,3 +66,4 @@ obj-$(CONFIG_HQ_HARDWARE_INFO)	+= hqhardwareinfo/
 obj-$(CONFIG_OPL_DEVICE_IFNO) += device_info/
 obj-$(CONFIG_DEVICES_DEV_IFNO) += dev_info/
 obj-$(CONFIG_UART0_OUTPUT_LOG_CONTROL) += uart0_log/
+obj-m 			        += hardware_info.o
