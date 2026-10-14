@@ -29,7 +29,7 @@ static const struct mfd_cell sc2703_disp_devs[] = {
 	},
 };
 
-static int boot_mode_check(char *str)
+static int __maybe_unused boot_mode_check(char *str)
 {
 	if (str != NULL && !strncmp(str, "cali", strlen("cali")))
 		cali_mode = true;
