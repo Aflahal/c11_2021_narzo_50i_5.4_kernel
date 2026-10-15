@@ -24,9 +24,11 @@ jobs:
       ARCH: arm64
       TZ: Asia/Jakarta
       KBUILD_BUILD_USER: 'Ardhiansyah_Aflahal'
+      
       # Ccache Flags
       USE_CCACHE: 1
       CCACHE_EXEC: /usr/bin/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
 
       # Toolchain Paths
       CLANG_BASE: ${{ github.workspace }}/toolchains/clang-r383902b
@@ -92,7 +94,7 @@ jobs:
       - name: Cache ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: ${{ github.workspace }}/.ccache
           key: ${{ runner.os }}-ccache-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-ccache-
