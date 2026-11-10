@@ -170,25 +170,25 @@
 				charge-cdp-current-microamp = <1500000 2100000>;
 				charge-unknown-current-microamp = <2100000 2100000>;
 
-				dcp-jeita-temp-table = <1000 1000 0 4435000>,
-					<1150 1150 1400000 4435000>,
-					<1450 1450 2100000 4435000>,
-					<1530 1530 1400000 4130000>;
+				dcp-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 1400000 4435000 1400000 4435000>,
+					<1450 1450 2100000 4435000 2100000 4435000>,
+					<1530 1530 1400000 4130000 1400000 4130000>;
 
-				sdp-jeita-temp-table = <1000 1000 0 4435000>,
-					<1150 1150 540000 4435000>,
-					<1450 1450 540000 4435000>,
-					<1530 1530 540000 4130000>;
+				sdp-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 540000 4435000 540000 4435000>,
+					<1450 1450 540000 4435000 540000 4435000>,
+					<1530 1530 540000 4130000 540000 4130000>;
 
-				cdp-jeita-temp-table = <1000 1000 0 4435000>,
-					<1150 1150 1400000 4435000>,
-					<1450 1450 1500000 4435000>,
-					<1530 1530 1400000 4130000>;
+				cdp-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 1400000 4435000 1400000 4435000>,
+					<1450 1450 1500000 4435000 1500000 4435000>,
+					<1530 1530 1400000 4130000 1400000 4130000>;
 
-				unknown-jeita-temp-table = <1000 1000 0 4435000>,
-					<1150 1150 1400000 4435000>,
-					<1450 1450 2100000 4435000>,
-					<1530 1530 1400000 4130000>;
+				unknown-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 1400000 4435000 1400000 4435000>,
+					<1450 1450 2100000 4435000 2100000 4435000>,
+					<1530 1530 1400000 4130000 1400000 4130000>;
 
 				force-jeita-status = <2>;
 			};
@@ -469,7 +469,7 @@
 
 &pmic_fgu {
 	monitored-battery = <&bat1 &bat2 &bat>;
-	sprd,calib-resistance-micro-ohms = <9886>; /* 10000 need change*/
+	sprd,calib-resistance-micro-ohms = <10000>;
 	sprd,comp-resistance-mohm = <15>;
 
 	fgu-capacity-track;
@@ -532,7 +532,9 @@
 	/* keyin0 ~ keyin2 */
 	"gpio_124", "gpio_125", "gpio_126",
 	/* extint0, extint1, scl3, sda3 */
-	"gpio_144", "gpio_145", "gpio_146", "gpio_147", "gpio_62", "gpio_pwm";
+	"gpio_144", "gpio_145", "gpio_146", "gpio_147", "gpio_62", "gpio_pwm",
+	/* Note:If create a new board,need to add the shutdown node */
+	"shutdown";
 	pinctrl-0 = <&gpio_121>;
 	pinctrl-1 = <&gpio_122>;
 	pinctrl-2 = <&gpio_123>;
@@ -545,6 +547,12 @@
 	pinctrl-9 = <&gpio_147>;
 	pinctrl-10 = <&gpio_62>;
 	pinctrl-11 = <&gpio_pwm>;
+	pinctrl-12 = <&shutdown0
+			&shutdown1
+			&shutdown2
+			&shutdown3
+			&shutdown4
+			&shutdown5>;
 
 	gpio_121: keyout0 {
 		pins = "SHARKL3_KEYOUT0";
@@ -611,11 +619,40 @@
 		function = "func2";
 	};
 
+	shutdown0: rfsen0 {
+		pins = "SHARKL3_RFSEN0";
+		function = "func4";
+	};
+
+	shutdown1: rfsck0 {
+		pins = "SHARKL3_RFSCK0";
+		function = "func4";
+	};
+
+	shutdown2: rfsda0 {
+		pins = "SHARKL3_RFSDA0";
+		function = "func4";
+	};
+
+	shutdown3: rfsen1 {
+		pins = "SHARKL3_RFSEN1";
+		function = "func4";
+	};
+
+	shutdown4: rfsck1 {
+		pins = "SHARKL3_RFSCK1";
+		function = "func4";
+	};
+
+	shutdown5: rfsda1 {
+		pins = "SHARKL3_RFSDA1";
+		function = "func4";
+	};
+
 };
 
 &sdio0 {
 	status = "okay";
-	cd-inverted;
 	cd-gpios = <&eic_async 9 0>;
 	vddcore-en = <&ap_gpio 29 0>;
 };
