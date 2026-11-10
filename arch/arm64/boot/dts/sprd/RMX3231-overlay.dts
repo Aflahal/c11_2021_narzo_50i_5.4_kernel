@@ -51,7 +51,7 @@
 			};
 
 			devices_devinfo:devices_devinfo {
-				compatible = "devices, dev_info";
+				compatible = "devices,dev_info";
 				/* sub_board-gpio = <&ap_gpio 96 0>; */
 				/* sdcard-gpio = <&ap_gpio 9 0>; */
 				status = "okay";
@@ -97,7 +97,7 @@
 							10110 838
 							24805 654
 							44922 413
-							54903 54903
+							54903 316
 							64895 238
 							74884 178
 							84883 133
@@ -137,10 +137,10 @@
 				constant-charge-voltage-max-microvolt = <4435000>;
 				factory-internal-resistance-micro-ohms = <128000>;
 				voltage-min-design-microvolt = <3450000>;
-				fullbat-voltage = <4410000>;
-				fullbat-current = <260000>;
+				fullbatt-voltage = <4410000>;
+				fullbatt-current = <260000>;
 				/*need change for fullbat-track-end-vol and fullbatt-track-end-cur*/
-				fullbat-track-end-vol = <4370000>;
+				fullbatt-track-end-vol = <4370000>;
 				fullbatt-track-end-cur = <260000>;
 				first-calib-voltage = <3600000>;
 				first-calib-capacity = <40>;
@@ -247,7 +247,7 @@
 					cm-regulator-name = "vddgen0";
 					cable@0 {
 						cm-cable-name = "USB";
-						extcon = <&pmic_typec>;
+						extcon = <&extcon_gpio>;
 					};
 				};
 			};
@@ -305,6 +305,10 @@
 &usb {
 	extcon = <&extcon_gpio>;
 	vbus-supply = <&vddvbus>;
+};
+
+&pmic_typec {
+	status = "disabled";
 };
 
 &panel {
