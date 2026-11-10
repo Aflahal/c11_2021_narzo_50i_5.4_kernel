@@ -1,15 +1,17 @@
 / {
-    fragment {
-            target-path = "/";
-            __overlay__ {
-
+	fragment@batt2 {
+		target-path = "/";
+		__overlay__ {
 			bat2: battery2 {
 				compatible = "simple-battery";
 				charge-full-design-microamp-hours = <4732000>;
 				charge-term-current-microamp = <240000>;
-				constant_charge_voltage_max_microvolt = <4435000>;
+				constant-charge-voltage-max-microvolt = <4435000>;
 				factory-internal-resistance-micro-ohms = <123000>;
 				voltage-min-design-microvolt = <3450000>;
+				fullbatt-voltage = <4410000>;
+				fullbatt-current = <260000>;
+
 				ocv-capacity-celsius = <20>;
 				ocv-capacity-table-0 = <4376000 100>, <4324000 95>, <4269000 90>,
 							<4211000 85>, <4154000 80>, <4100000 75>,
@@ -27,13 +29,32 @@
 							<111497 1600>, <96484 1650>, <81275 1700>,
 							<72771 1750>, <63423 1800>, <55444 1850>,
 							<48599 1900>, <42668 1950>, <37552 2000>;
-				capacity-temp-table =<45 100>, <25 100>, <10 100>, <0 90>, <(-10) 87>, <(-20) 73>;
-				resistance-temp-table =<45 100>, <25 100>, <10 153>, <0 933>, <(-10) 1016>, <(-20) 1112>;
+				capacity-temp-table = <45 100>, <25 100>, <10 100>, <0 90>, <(-10) 87>, <(-20) 73>;
+				resistance-temp-table = <45 100>, <25 100>, <10 153>, <0 933>, <(-10) 1016>, <(-20) 1112>;
+
 				charge-sdp-current-microamp = <500000 2000000>;
 				charge-dcp-current-microamp = <2100000 2200000>;
 				charge-cdp-current-microamp = <1500000 2100000>;
 				charge-unknown-current-microamp = <2100000 2100000>;
+
+				dcp-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 1400000 4435000 1400000 4435000>,
+					<1450 1450 2100000 4435000 2100000 4435000>,
+					<1530 1530 1400000 4130000 1400000 4130000>;
+				sdp-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 540000 4435000 540000 4435000>,
+					<1450 1450 540000 4435000 540000 4435000>,
+					<1530 1530 540000 4130000 540000 4130000>;
+				cdp-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 1400000 4435000 1400000 4435000>,
+					<1450 1450 1500000 4435000 1500000 4435000>,
+					<1530 1530 1400000 4130000 1400000 4130000>;
+				unknown-jeita-temp-table = <1000 1000 0 4435000 0 4435000>,
+					<1150 1150 1400000 4435000 1400000 4435000>,
+					<1450 1450 2100000 4435000 2100000 4435000>,
+					<1530 1530 1400000 4130000 1400000 4130000>;
+				force-jeita-status = <2>;
 			};
-        };
-    };
+		};
+	};
 };
