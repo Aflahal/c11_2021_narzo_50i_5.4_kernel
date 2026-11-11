@@ -473,7 +473,7 @@
 	sprd,calib-resistance-micro-ohms = <10000>;
 	sprd,comp-resistance-mohm = <15>;
 
-	fgu-capacity-track;
+	/* fgu-capacity-track; */
 	phys = <&hsphy>;
 };
 
