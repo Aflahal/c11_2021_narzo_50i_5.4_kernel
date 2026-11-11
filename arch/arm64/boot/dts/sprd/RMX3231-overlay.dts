@@ -303,6 +303,7 @@
  
  /*need change for status and vbus1 not vbus*/
 &usb {
+	status = "okay";
 	extcon = <&extcon_gpio>;
 	vbus-supply = <&vddvbus>;
 };
